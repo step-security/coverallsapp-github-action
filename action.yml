@@ -1,0 +1,432 @@
+# action.yml
+name: 'Coveralls GitHub Action'
+description: 'Send test coverage data to Coveralls.io for analysis, change tracking, and notifications.'
+author: 'step-security'
+inputs:
+  github-token:
+    description: 'Put secrets.GITHUB_TOKEN here'
+    required: false
+    default: ${{ github.token }}
+  path-to-lcov:
+    description: 'Path to lcov file [DEPRECATED]'
+    required: false
+  file:
+    description: 'Coverage file'
+    required: false
+  files:
+    description: 'Space-separated list of coverage files'
+    required: false
+  format:
+    description: 'Force coverage format, supported formats: lcov, simplecov, cobertura, jacoco, gcov, golang, python'
+    required: false
+  flag-name:
+    description: 'Job flag name, e.g. "Unit", "Functional", or "Integration". Will be shown in the Coveralls UI.'
+    required: false
+  build-number:
+    description: 'Override the build number autodetected from CI. This is useful if your CI tool assigns a different build number per each parallel build.'
+    required: false
+  parallel:
+    description: 'Set to true if you are running parallel jobs, then use "parallel-finished: true" for the last action.'
+    required: false
+  parallel-finished:
+    description: 'Set to true for the last action when using "parallel: true".'
+    required: false
+  carryforward:
+    description: 'Comma separated flags used to carryforward results from previous builds if some of the parallel jobs are missing.'
+    required: false
+  coveralls-endpoint:
+    description: 'Coveralls Enterprise server (more info: https://enterprise.coveralls.io)'
+    required: false
+    default: 'https://coveralls.io'
+  allow-empty:
+    description: "Don't fail when coverage report file is empty or contains no data"
+    required: false
+    default: 'false'
+  base-path:
+    description: 'The root folder of the project that originally ran the tests'
+    required: false
+  git-branch:
+    description: 'Override the branch name'
+    required: false
+  git-commit:
+    description: 'Override the commit sha'
+    required: false
+  compare-ref:
+    description: 'Branch name to use as the base for coverage results'
+    required: false
+  compare-sha:
+    description: 'Commit SHA to use as the base for coverage results'
+    required: false
+  debug:
+    description: 'Enable debug output'
+    required: false
+    default: 'false'
+  measure:
+    description: 'Show execution time of parsing and reporting'
+    required: false
+    default: 'false'
+  fail-on-error:
+    description: 'Whether to fail (exit code 1) on any issues while uploading the coverage'
+    required: false
+    default: 'true'
+  coverage-reporter-version:
+    description: "Version of coverage-reporter to use. Make sure to prefix the version number with 'v'. For example: v0.6.9"
+    required: false
+    default: 'latest'
+  coverage-reporter-platform:
+    description: "Platform of coverage-reporter to use on Linux runners. Supported values: auto-detect (default), x86_64, aarch64, arm64."
+    required: false
+    default: 'auto-detect'
+branding:
+  color: 'green'
+  icon: 'percent'
+runs:
+  using: 'composite'
+  steps:
+    - name: Subscription check
+      env:
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+      run: |
+        # validate subscription status
+        UPSTREAM="coverallsapp/github-action"
+        ACTION_REPO="${GITHUB_ACTION_REPOSITORY:-}"
+        DOCS_URL="https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions"
+
+        echo ""
+        echo -e "\033[1;36mStepSecurity Maintained Action\033[0m"
+        echo "Secure drop-in replacement for $UPSTREAM"
+        if [ "$REPO_PRIVATE" = "false" ]; then
+          echo -e "\033[32m✓ Free for public repositories\033[0m"
+        fi
+        echo -e "\033[36mLearn more:\033[0m $DOCS_URL"
+        echo ""
+
+        if [ "$REPO_PRIVATE" != "false" ]; then
+          SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+
+          if [ "$SERVER_URL" != "https://github.com" ]; then
+            BODY=$(printf '{"action":"%s","ghes_server":"%s"}' "$ACTION_REPO" "$SERVER_URL")
+          else
+            BODY=$(printf '{"action":"%s"}' "$ACTION_REPO")
+          fi
+
+          API_URL="https://agent.api.stepsecurity.io/v1/github/$GITHUB_REPOSITORY/actions/maintained-actions-subscription"
+
+          RESPONSE=$(curl --max-time 3 -s -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$API_URL" -o /dev/null) && CURL_EXIT_CODE=0 || CURL_EXIT_CODE=$?
+
+          if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "Timeout or API not reachable. Continuing to next step."
+          elif [ "$RESPONSE" = "403" ]; then
+            echo -e "::error::\033[1;31mThis action requires a StepSecurity subscription for private repositories.\033[0m"
+            echo -e "::error::\033[31mLearn how to enable a subscription: $DOCS_URL\033[0m"
+            exit 1
+          fi
+        fi
+      shell: bash
+
+    - name: Report coverage-reporter-version exception for macOS
+      if: ${{ runner.os == 'macOS' && inputs.coverage-reporter-version != 'latest' }}
+      shell: bash
+      run: |
+        echo "Warning: The coverage-reporter-version parameter is not available on macOS. The latest version will be installed via Homebrew." >&2
+
+    - name: Report coverage-reporter-platform exception for macOS
+      if: ${{ runner.os == 'macOS' && inputs.coverage-reporter-platform != '' }}
+      shell: bash
+      run: |
+        echo "Warning: The coverage-reporter-platform parameter is not available on macOS. The default version for macOS will be used." >&2
+
+    - name: Install coveralls reporter (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        # Enable debugging if 'debug' is true
+        [ "${{ inputs.debug }}" == "true" ] && set -x
+
+        # Try to install coverage-reporter via Homebrew.
+        # The fully-qualified formula name auto-taps the repo and trusts only
+        # this formula, as required by tap trust in Homebrew 6.0.0+.
+        if ! brew install coverallsapp/coveralls/coveralls --quiet; then
+          echo "Failed to install coveralls via Homebrew (macOS)."
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+
+        # Check if the binary exists in the possible locations
+        if [ -f /usr/local/bin/coveralls ]; then
+          echo "/usr/local/bin" >> $GITHUB_PATH
+        elif [ -f /opt/homebrew/bin/coveralls ]; then
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
+        else
+          echo "Coveralls binary not found after installation (macOS)."
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+
+    - name: Install coveralls reporter (Linux)
+      if: runner.os == 'Linux'
+      env:
+        COVERAGE_REPORTER_VERSION: ${{ inputs.coverage-reporter-version }}
+        COVERAGE_REPORTER_PLATFORM: ${{ inputs.coverage-reporter-platform }}
+      shell: bash
+      run: |
+        # Enable debugging if 'debug' is true
+        [ "${{ inputs.debug }}" == "true" ] && set -x
+
+        mkdir -p ~/bin/
+        cd ~/bin/
+
+        # Determine which version of coverage-reporter to download
+        if [ -z "$COVERAGE_REPORTER_VERSION" ] || [ "$COVERAGE_REPORTER_VERSION" == "latest" ]; then
+          asset_path="latest/download"
+          version_message="latest"
+        else
+          asset_path="download/${COVERAGE_REPORTER_VERSION}"
+          version_message="$COVERAGE_REPORTER_VERSION"
+        fi
+
+        # Function to compare version numbers
+        version_ge() {
+          # Compare two version numbers
+          [ "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1" ]
+        }
+
+        # Determine the platform-specific filename:
+        # This logic is necessary due to the introduction of multiple platform support starting from v0.6.15.
+        # It selects the correct filename based on the specified platform and version, while ensuring
+        # backward compatibility with earlier versions that only supported a generic Linux binary for x86_64.
+        if [ -z "$COVERAGE_REPORTER_PLATFORM" ] || [ "$COVERAGE_REPORTER_PLATFORM" == "auto-detect" ]; then
+          COVERAGE_REPORTER_PLATFORM="$(uname -m)"
+        fi
+        case "$COVERAGE_REPORTER_PLATFORM" in
+          x86_64|"")
+            if version_ge "$COVERAGE_REPORTER_VERSION" "v0.6.15"; then
+              platform_filename="coveralls-linux-x86_64.tar.gz"
+            else
+              platform_filename="coveralls-linux.tar.gz"
+            fi
+            ;;
+          aarch64|arm64)
+            if version_ge "$COVERAGE_REPORTER_VERSION" "v0.6.15"; then
+              platform_filename="coveralls-linux-aarch64.tar.gz"
+            else
+              echo "Warning: The aarch64/arm64 platform is only supported from version v0.6.15 onwards. Proceeding with v0.6.15." >&2
+              asset_path="download/v0.6.15"
+              platform_filename="coveralls-linux-aarch64.tar.gz"
+            fi
+            ;;
+          *)
+            echo "Warning: Unsupported platform: $COVERAGE_REPORTER_PLATFORM. The default x86_64 version ($version_message) will be used." >&2
+            if version_ge "$COVERAGE_REPORTER_VERSION" "v0.6.15"; then
+              platform_filename="coveralls-linux-x86_64.tar.gz"
+            else
+              platform_filename="coveralls-linux.tar.gz"
+            fi
+            ;;
+        esac
+
+        # Checksum verification:
+        # The following code was chosen to replace the more simple `sha256sum -c` because it provides
+        # clearer debugging information around our new matrix of supported coverage-reporter versions and platforms.
+        # We may drop back to `${platform_filename}" coveralls-checksums.txt | sha256sum -c` when we're more confidently handling these.
+
+        # Try to download the binary and checksum file
+        if ! curl -sLO "https://github.com/coverallsapp/coverage-reporter/releases/${asset_path}/${platform_filename}" ||
+          ! curl -sLO "https://github.com/coverallsapp/coverage-reporter/releases/${asset_path}/coveralls-checksums.txt"; then
+          echo "Failed to download coveralls binary or checksum (Linux)."
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+
+        # DEBUG: Print contents of checksum file for debugging
+        echo "Contents of coveralls-checksums.txt:"
+        cat coveralls-checksums.txt
+
+        # Extract expected checksum
+        expected_checksum=$(grep "${platform_filename}" coveralls-checksums.txt | awk '{print $1}')
+        if [ -z "$expected_checksum" ]; then
+          echo "Failed to extract checksum for ${platform_filename}"
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+
+        # Compute actual checksum
+        actual_checksum=$(sha256sum "${platform_filename}" | awk '{print $1}')
+
+        # Perform verification by comparing expected and actual checksums
+        if [ "$expected_checksum" != "$actual_checksum" ]; then
+          echo "Checksum verification failed (Linux)."
+          echo "Expected: $expected_checksum"
+          echo "Actual: $actual_checksum"
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+
+        tar -xzf "${platform_filename}"
+
+        # Check if the binary exists
+        if [ ! -f ~/bin/coveralls ]; then
+          echo "Coveralls binary not found after extraction (Linux)."
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+
+        # Cleanup
+        rm coveralls-checksums.txt
+        echo ~/bin >> $GITHUB_PATH
+
+    - name: Report coverage-reporter-platform exception for Windows
+      if: ${{ startsWith(runner.os, 'Windows') && inputs.coverage-reporter-platform != '' }}
+      shell: pwsh
+      run: |
+        Write-Host "Warning: The coverage-reporter-platform parameter is not available on Windows. The default version for Windows will be used." -ForegroundColor Yellow
+
+    - name: Install coveralls reporter (Windows)
+      if: startsWith(runner.os, 'Windows')
+      env:
+        COVERAGE_REPORTER_VERSION: ${{ inputs.coverage-reporter-version }}
+      shell: pwsh
+      run: |
+        # Enable debugging if 'debug' is true
+        if ("${{ inputs.debug }}" -eq "true") {
+          Set-PSDebug -Trace 1
+        }
+
+        # Try to download the binary and checksum file
+        New-Item -Path $env:HOME\bin -ItemType directory -Force
+        Push-Location $env:HOME\bin
+        try {
+          if ([string]::IsNullOrEmpty($env:COVERAGE_REPORTER_VERSION) -or $env:COVERAGE_REPORTER_VERSION -eq "latest") {
+            Invoke-WebRequest -Uri "https://github.com/coverallsapp/coverage-reporter/releases/latest/download/coveralls-windows.exe" -OutFile "coveralls.exe"
+            Invoke-WebRequest -Uri "https://github.com/coverallsapp/coverage-reporter/releases/latest/download/coveralls-checksums.txt" -OutFile "sha256sums.txt"
+          } else {
+            Invoke-WebRequest -Uri "https://github.com/coverallsapp/coverage-reporter/releases/download/$env:COVERAGE_REPORTER_VERSION/coveralls-windows.exe" -OutFile "coveralls.exe"
+            Invoke-WebRequest -Uri "https://github.com/coverallsapp/coverage-reporter/releases/download/$env:COVERAGE_REPORTER_VERSION/coveralls-checksums.txt" -OutFile "sha256sums.txt"
+          }
+        } catch {
+          Write-Host "Failed to download coveralls binary or checksum (Windows)."
+          if ("${{ inputs.fail-on-error }}" -eq "false") {
+            exit 0
+          }
+          exit 1
+        }
+
+        # Try to verify the downloaded binary
+        if ((Get-FileHash coveralls.exe).Hash -ne (Get-Content sha256sums.txt | Select-String 'windows.exe' | ForEach-Object { ($_ -split "\s+")[0] })) {
+          Write-Host "Checksum verification failed (Windows)."
+          if ("${{ inputs.fail-on-error }}" -eq "false") {
+            exit 0
+          }
+          exit 1
+        }
+
+        # Check if the binary exists
+        if (!(Test-Path -Path "$env:HOME\bin\coveralls.exe")) {
+          Write-Host "Coveralls binary not found after download and verification (Windows)."
+          if ("${{ inputs.fail-on-error }}" -eq "false") {
+            exit 0
+          }
+          exit 1
+        }
+
+        # Cleanup
+        Remove-Item sha256sums.txt -Force
+        echo $env:HOME\bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Done report (Unix)
+      if: inputs.parallel-finished == 'true' && !startsWith(runner.os, 'Windows')
+      shell: bash
+      run: |
+        # Check if coveralls binary exists
+        if ! command -v coveralls &> /dev/null; then
+          echo "Coveralls binary not found. Skipping done report."
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+        coveralls done ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }}
+      env:
+        COVERALLS_DEBUG: ${{ inputs.debug }}
+        COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
+        COVERALLS_FLAG_NAME: ${{ inputs.flag-name }}
+        COVERALLS_PARALLEL: ${{ inputs.parallel }}
+        COVERALLS_ENDPOINT: ${{ inputs.coveralls-endpoint }}
+        COVERALLS_GIT_BRANCH: ${{ inputs.git-branch }}
+        COVERALLS_GIT_COMMIT: ${{ inputs.git-commit }}
+        COVERALLS_REPO_TOKEN: ${{ inputs.github-token }}
+
+    - name: Done report (Windows)
+      if: inputs.parallel-finished == 'true' && startsWith(runner.os, 'Windows')
+      shell: pwsh
+      run: |
+        # Check if coveralls binary exists
+        if (!(Get-Command coveralls -ErrorAction SilentlyContinue)) {
+          Write-Host "Coveralls binary not found. Skipping done report."
+          if ("${{ inputs.fail-on-error }}" -eq "false") {
+            exit 0
+          }
+          exit 1
+        }
+        coveralls done ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }}
+      env:
+        COVERALLS_DEBUG: ${{ inputs.debug }}
+        COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
+        COVERALLS_FLAG_NAME: ${{ inputs.flag-name }}
+        COVERALLS_PARALLEL: ${{ inputs.parallel }}
+        COVERALLS_ENDPOINT: ${{ inputs.coveralls-endpoint }}
+        COVERALLS_GIT_BRANCH: ${{ inputs.git-branch }}
+        COVERALLS_GIT_COMMIT: ${{ inputs.git-commit }}
+        COVERALLS_REPO_TOKEN: ${{ inputs.github-token }}
+
+    - name: Coverage report (Unix)
+      if: inputs.parallel-finished != 'true' && !startsWith(runner.os, 'Windows')
+      shell: bash
+      run: |
+        # Check if coveralls binary exists
+        if ! command -v coveralls &> /dev/null; then
+          echo "Coveralls binary not found. Skipping coverage report."
+          [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
+          exit 1
+        fi
+        coveralls report ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }} ${{ inputs.allow-empty == 'true' && '--allow-empty' || '' }} ${{ inputs.base-path && format('--base-path {0}', inputs.base-path) || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.format && format('--format {0}', inputs.format) || '' }} ${{ inputs.file || inputs.path-to-lcov }} ${{ inputs.files }}
+      env:
+        COVERALLS_DEBUG: ${{ inputs.debug }}
+        COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
+        COVERALLS_FLAG_NAME: ${{ inputs.flag-name }}
+        COVERALLS_PARALLEL: ${{ inputs.parallel }}
+        COVERALLS_ENDPOINT: ${{ inputs.coveralls-endpoint }}
+        COVERALLS_GIT_BRANCH: ${{ inputs.git-branch }}
+        COVERALLS_GIT_COMMIT: ${{ inputs.git-commit }}
+        COVERALLS_REPO_TOKEN: ${{ inputs.github-token }}
+        COVERALLS_COMPARE_REF: ${{ inputs.compare-ref }}
+        COVERALLS_COMPARE_SHA: ${{ inputs.compare-sha }}
+        COVERALLS_SOURCE_HEADER: github-action
+
+    - name: Coverage report (Windows)
+      if: inputs.parallel-finished != 'true' && startsWith(runner.os, 'Windows')
+      shell: pwsh
+      run: |
+        # Check if coveralls binary exists
+        if (!(Get-Command coveralls -ErrorAction SilentlyContinue)) {
+          Write-Host "Coveralls binary not found. Skipping coverage report."
+          if ("${{ inputs.fail-on-error }}" -eq "false") {
+            exit 0
+          }
+          exit 1
+        }
+        coveralls report ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }} ${{ inputs.allow-empty == 'true' && '--allow-empty' || '' }} ${{ inputs.base-path && format('--base-path {0}', inputs.base-path) || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.format && format('--format {0}', inputs.format) || '' }} ${{ inputs.file || inputs.path-to-lcov }} ${{ inputs.files }}
+      env:
+        COVERALLS_DEBUG: ${{ inputs.debug }}
+        COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
+        COVERALLS_FLAG_NAME: ${{ inputs.flag-name }}
+        COVERALLS_PARALLEL: ${{ inputs.parallel }}
+        COVERALLS_ENDPOINT: ${{ inputs.coveralls-endpoint }}
+        COVERALLS_GIT_BRANCH: ${{ inputs.git-branch }}
+        COVERALLS_GIT_COMMIT: ${{ inputs.git-commit }}
+        COVERALLS_REPO_TOKEN: ${{ inputs.github-token }}
+        COVERALLS_COMPARE_REF: ${{ inputs.compare-ref }}
+        COVERALLS_COMPARE_SHA: ${{ inputs.compare-sha }}
+        COVERALLS_SOURCE_HEADER: github-action
