@@ -347,7 +347,7 @@ runs:
           [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
           exit 1
         fi
-        coveralls done ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }}
+        coveralls done ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${INPUT_BUILD_NUMBER:+--build-number "$INPUT_BUILD_NUMBER"} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }}
       env:
         COVERALLS_DEBUG: ${{ inputs.debug }}
         COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
@@ -357,6 +357,7 @@ runs:
         COVERALLS_GIT_BRANCH: ${{ inputs.git-branch }}
         COVERALLS_GIT_COMMIT: ${{ inputs.git-commit }}
         COVERALLS_REPO_TOKEN: ${{ inputs.github-token }}
+        INPUT_BUILD_NUMBER: ${{ inputs.build-number }}
 
     - name: Done report (Windows)
       if: inputs.parallel-finished == 'true' && startsWith(runner.os, 'Windows')
@@ -370,7 +371,8 @@ runs:
           }
           exit 1
         }
-        coveralls done ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }}
+        $buildNumberArg = if ($env:INPUT_BUILD_NUMBER) { @('--build-number', $env:INPUT_BUILD_NUMBER) } else { @() }
+        coveralls done ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} @buildNumberArg ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }}
       env:
         COVERALLS_DEBUG: ${{ inputs.debug }}
         COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
@@ -380,6 +382,7 @@ runs:
         COVERALLS_GIT_BRANCH: ${{ inputs.git-branch }}
         COVERALLS_GIT_COMMIT: ${{ inputs.git-commit }}
         COVERALLS_REPO_TOKEN: ${{ inputs.github-token }}
+        INPUT_BUILD_NUMBER: ${{ inputs.build-number }}
 
     - name: Coverage report (Unix)
       if: inputs.parallel-finished != 'true' && !startsWith(runner.os, 'Windows')
@@ -391,7 +394,7 @@ runs:
           [ "${{ inputs.fail-on-error }}" == "false" ] && exit 0
           exit 1
         fi
-        coveralls report ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }} ${{ inputs.allow-empty == 'true' && '--allow-empty' || '' }} ${{ inputs.base-path && format('--base-path {0}', inputs.base-path) || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.format && format('--format {0}', inputs.format) || '' }} ${{ inputs.file || inputs.path-to-lcov }} ${{ inputs.files }}
+        coveralls report ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }} ${{ inputs.allow-empty == 'true' && '--allow-empty' || '' }} ${INPUT_BASE_PATH:+--base-path "$INPUT_BASE_PATH"} ${INPUT_BUILD_NUMBER:+--build-number "$INPUT_BUILD_NUMBER"} ${INPUT_FORMAT:+--format "$INPUT_FORMAT"} ${INPUT_FILE:+"$INPUT_FILE"} ${INPUT_FILES}
       env:
         COVERALLS_DEBUG: ${{ inputs.debug }}
         COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
@@ -404,6 +407,11 @@ runs:
         COVERALLS_COMPARE_REF: ${{ inputs.compare-ref }}
         COVERALLS_COMPARE_SHA: ${{ inputs.compare-sha }}
         COVERALLS_SOURCE_HEADER: github-action
+        INPUT_FILE: ${{ inputs.file || inputs.path-to-lcov }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_BASE_PATH: ${{ inputs.base-path }}
+        INPUT_BUILD_NUMBER: ${{ inputs.build-number }}
+        INPUT_FORMAT: ${{ inputs.format }}
 
     - name: Coverage report (Windows)
       if: inputs.parallel-finished != 'true' && startsWith(runner.os, 'Windows')
@@ -417,7 +425,13 @@ runs:
           }
           exit 1
         }
-        coveralls report ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }} ${{ inputs.allow-empty == 'true' && '--allow-empty' || '' }} ${{ inputs.base-path && format('--base-path {0}', inputs.base-path) || '' }} ${{ inputs.build-number && format('--build-number {0}', inputs.build-number) || '' }} ${{ inputs.format && format('--format {0}', inputs.format) || '' }} ${{ inputs.file || inputs.path-to-lcov }} ${{ inputs.files }}
+        $extraArgs = @()
+        if ($env:INPUT_BASE_PATH) { $extraArgs += @('--base-path', $env:INPUT_BASE_PATH) }
+        if ($env:INPUT_BUILD_NUMBER) { $extraArgs += @('--build-number', $env:INPUT_BUILD_NUMBER) }
+        if ($env:INPUT_FORMAT) { $extraArgs += @('--format', $env:INPUT_FORMAT) }
+        if ($env:INPUT_FILE) { $extraArgs += $env:INPUT_FILE }
+        if ($env:INPUT_FILES) { $extraArgs += ($env:INPUT_FILES -split '\s+' | Where-Object { $_ }) }
+        coveralls report ${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.measure == 'true' && '--measure' || '' }} ${{ inputs.fail-on-error == 'false' && '--no-fail' || '' }} ${{ inputs.allow-empty == 'true' && '--allow-empty' || '' }} @extraArgs
       env:
         COVERALLS_DEBUG: ${{ inputs.debug }}
         COVERALLS_CARRYFORWARD_FLAGS: ${{ inputs.carryforward }}
@@ -430,3 +444,8 @@ runs:
         COVERALLS_COMPARE_REF: ${{ inputs.compare-ref }}
         COVERALLS_COMPARE_SHA: ${{ inputs.compare-sha }}
         COVERALLS_SOURCE_HEADER: github-action
+        INPUT_FILE: ${{ inputs.file || inputs.path-to-lcov }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_BASE_PATH: ${{ inputs.base-path }}
+        INPUT_BUILD_NUMBER: ${{ inputs.build-number }}
+        INPUT_FORMAT: ${{ inputs.format }}
